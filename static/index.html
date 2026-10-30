@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Athena Unit Test Tool</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><a class="brand" href="/"><span class="logo">≋</span>Athena <strong>Unit Tests</strong></a><span class="local"><i></i> LOCAL · DEV · ENGINE 3</span></header>
+<main>
+  <section class="intro"><p class="eyebrow">DBT → ATHENA</p><h1>Một model. Ba query kiểm tra.</h1><p>Dán SQL dbt, xác nhận phạm vi và khóa. Copy query để chạy trên Athena.</p></section>
+  <form id="form">
+    <div class="settings">
+      <label>Ngày ETL<input type="date" id="etl_date" value="2026-07-01" required></label>
+      <label>Ngữ cảnh incremental<select id="mode"><option value="">Chọn nếu model yêu cầu</option><option value="full_refresh">Full refresh</option><option value="incremental">Incremental</option></select></label>
+      <label>Phạm vi target<select id="scope_mode"><option value="snapshot">SYM_RUN_DATE = ngày ETL</option><option value="custom">WHERE tùy chỉnh</option><option value="all">Toàn bộ target</option></select></label>
+      <label id="filter_label" hidden>Điều kiện target (không có WHERE)<input id="target_filter" placeholder="business_date = DATE '2026-07-01'"></label>
+    </div>
+    <label class="confirm"><input type="checkbox" id="scope_confirmed">Tôi xác nhận phạm vi target đã chọn tương ứng với kết quả nguồn của model.</label>
+    <details class="advanced"><summary>Cấu hình nâng cao <span>Repo, target, khóa và biến dbt</span></summary>
+      <div class="advanced-grid">
+        <label>Đường dẫn repo<input id="repo" placeholder="C:\nguyen\Projects\VIB2\km-etl-newcore"><small>Thư mục chứa dbt/dbt_project.yml. Chỉ đọc metadata.</small></label>
+        <label>Tên model (không bắt buộc)<input id="model_name" placeholder="km_stg_tdh_sds_cl_invoice"><small>Hỗ trợ metadata khi SQL đã chỉnh sửa so với file lưu.</small></label>
+        <label>Target table<input id="target" placeholder="Tự nhận diện từ config/model"><small>Dạng schema.table hoặc catalog.schema.table.</small></label>
+        <label>Khóa unique/business<input id="keys" placeholder="Ví dụ: INTERNAL_KEY"><small>Nhiều cột phân cách bằng dấu phẩy. Không tự đoán khóa.</small></label>
+        <label>Cột output khi SELECT * chưa resolve được<input id="output_columns" placeholder="id, business_date, amount"><small>Nhập đủ tên cột, theo đúng thứ tự đầu ra.</small></label>
+        <label>Biến dbt bổ sung (JSON)<textarea id="variables" rows="3" spellcheck="false">{}</textarea><small>Ví dụ {"env_landing": "dev_lnd"}. Ngày ETL lấy từ ô trên.</small></label>
+      </div>
+    </details>
+    <section class="editor"><div class="panel-header"><h2>SQL dbt</h2><button type="button" id="clear" class="quiet">Xóa</button></div><label for="sql" class="sr-only">Dán SQL model dbt</label><textarea id="sql" spellcheck="false" placeholder="{{ config(schema=var('env_km_staging'), alias='my_table', unique_key='id') }}&#10;&#10;SELECT ...&#10;FROM {{ ref('my_source_model') }}&#10;WHERE ds_dt = date'{{ var(&quot;etl_date&quot;) }}'" required></textarea></section>
+    <div class="toolbar"><span id="feedback" role="status" aria-live="polite">Đang đọc metadata local…</span><button id="generate" class="primary" type="submit">Generate Unit Tests <span>→</span></button></div>
+  </form>
+  <section id="results" hidden>
+    <div class="results-title"><div><p class="eyebrow">KẾT QUẢ SINH SQL</p><h2 id="result_title">Unit tests</h2></div><button id="download_all" class="secondary">↓ Tải cả 3 query</button></div>
+    <div id="summary" class="summary-box"></div>
+    <div id="issues" class="messages" role="status"></div>
+    <div id="key_choices"></div>
+    <div class="tabs" role="tablist" aria-label="Test cases">
+      <button type="button" id="tab0" role="tab" aria-controls="test_panel" data-tab="0">UT001 <span>Count</span></button>
+      <button type="button" id="tab1" role="tab" aria-controls="test_panel" data-tab="1">UT002 <span>Duplicate</span></button>
+      <button type="button" id="tab2" role="tab" aria-controls="test_panel" data-tab="2">UT003 <span>Minus</span></button>
+    </div>
+    <section class="editor" id="test_panel" role="tabpanel" tabindex="0">
+      <div class="panel-header"><h3 id="test_title"></h3><div class="actions"><span class="badge">Not Executed</span><button id="copy" class="secondary">Copy SQL</button><button id="download" class="secondary">↓ SQL</button></div></div>
+      <p id="expected" class="expected"></p><p id="test_issue" class="test-issue" hidden></p>
+      <label for="test_sql" class="sr-only">Generated Athena SQL</label><textarea id="test_sql" readonly spellcheck="false"></textarea>
+      <details class="metadata"><summary>Thông tin testcase · UT.xlsx</summary><dl id="test_meta"></dl></details>
+    </section>
+    <details class="report"><summary>SQL đã chuyển sang Athena</summary><textarea id="converted" readonly spellcheck="false" aria-label="Converted SQL"></textarea></details>
+    <details class="report"><summary>Resolve bảng nguồn và ghi chú chuyển đổi</summary><div class="table-scroll"><table><thead><tr><th>Reference</th><th>Physical table</th><th>Evidence</th></tr></thead><tbody id="mappings"></tbody></table></div><ul id="notes"></ul></details>
+  </section>
+  <footer><span>Chỉ sinh SQL. Không kết nối AWS, không thực thi query và không thay đổi repo dbt.</span><span id="health"></span></footer>
+</main>
+</body></html>
