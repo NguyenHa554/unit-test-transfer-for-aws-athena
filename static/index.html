@@ -4,7 +4,7 @@
 <body>
 <header><a class="brand" href="/"><span class="logo">≋</span>Athena <strong>Unit Tests</strong></a><span class="local"><i></i> LOCAL · DEV · ENGINE 3</span></header>
 <main>
-  <section class="intro"><p class="eyebrow">DBT → ATHENA</p><h1>Một model. Ba query kiểm tra.</h1><p>Dán SQL dbt, xác nhận phạm vi và khóa. Copy query để chạy trên Athena.</p></section>
+  <section class="intro"><p class="eyebrow">DBT → ATHENA</p><h1>Một model. Ba query kiểm tra.</h1><p>Dán SQL dbt và bấm Generate Unit Tests. Copy query để chạy trên Athena.</p></section>
   <form id="form">
     <div class="settings">
       <label>Ngày ETL<input type="date" id="etl_date" value="2026-07-01" required></label>
@@ -12,13 +12,12 @@
       <label>Phạm vi target<select id="scope_mode"><option value="snapshot">SYM_RUN_DATE = ngày ETL</option><option value="custom">WHERE tùy chỉnh</option><option value="all">Toàn bộ target</option></select></label>
       <label id="filter_label" hidden>Điều kiện target (không có WHERE)<input id="target_filter" placeholder="business_date = DATE '2026-07-01'"></label>
     </div>
-    <label class="confirm"><input type="checkbox" id="scope_confirmed">Tôi xác nhận phạm vi target đã chọn tương ứng với kết quả nguồn của model.</label>
     <details class="advanced"><summary>Cấu hình nâng cao <span>Repo, target, khóa và biến dbt</span></summary>
       <div class="advanced-grid">
         <label>Đường dẫn repo<input id="repo" placeholder="C:\nguyen\Projects\VIB2\km-etl-newcore"><small>Thư mục chứa dbt/dbt_project.yml. Chỉ đọc metadata.</small></label>
         <label>Tên model (không bắt buộc)<input id="model_name" placeholder="km_stg_tdh_sds_cl_invoice"><small>Hỗ trợ metadata khi SQL đã chỉnh sửa so với file lưu.</small></label>
         <label>Target table<input id="target" placeholder="Tự nhận diện từ config/model"><small>Dạng schema.table hoặc catalog.schema.table.</small></label>
-        <label>Khóa unique/business<input id="keys" placeholder="Ví dụ: INTERNAL_KEY"><small>Nhiều cột phân cách bằng dấu phẩy. Không tự đoán khóa.</small></label>
+        <label>Khóa đơn hoặc khóa ghép<input id="keys" placeholder="INTERNAL_KEY hoặc LOAN_NO, DD_NO"><small>Khóa ghép: nhập các cột cách nhau bằng dấu phẩy. Chỉ báo trùng khi toàn bộ tổ hợp khóa trùng.</small></label>
         <label>Cột output khi SELECT * chưa resolve được<input id="output_columns" placeholder="id, business_date, amount"><small>Nhập đủ tên cột, theo đúng thứ tự đầu ra.</small></label>
         <label>Biến dbt bổ sung (JSON)<textarea id="variables" rows="3" spellcheck="false">{}</textarea><small>Ví dụ {"env_landing": "dev_lnd"}. Ngày ETL lấy từ ô trên.</small></label>
       </div>
@@ -39,10 +38,18 @@
     <section class="editor" id="test_panel" role="tabpanel" tabindex="0">
       <div class="panel-header"><h3 id="test_title"></h3><div class="actions"><span class="badge">Not Executed</span><button id="copy" class="secondary">Copy SQL</button><button id="download" class="secondary">↓ SQL</button></div></div>
       <p id="expected" class="expected"></p><p id="test_issue" class="test-issue" hidden></p>
+      <div id="duplicate_key_prompt" class="panel-header" hidden>
+        <label for="duplicate_keys">Khóa đơn hoặc khóa ghép để kiểm tra trùng
+          <input id="duplicate_keys" list="duplicate_columns" placeholder="INTERNAL_KEY hoặc LOAN_NO, DD_NO, REPAY_DATE">
+          <small>Nhiều cột: phân cách bằng dấu phẩy. GROUP BY theo toàn bộ tổ hợp, không kiểm tra từng cột riêng.</small>
+        </label>
+        <datalist id="duplicate_columns"></datalist>
+        <button type="button" id="generate_duplicate" class="secondary">Sinh SQL Duplicate</button>
+      </div>
       <label for="test_sql" class="sr-only">Generated Athena SQL</label><textarea id="test_sql" readonly spellcheck="false"></textarea>
       <details class="metadata"><summary>Thông tin testcase · UT.xlsx</summary><dl id="test_meta"></dl></details>
     </section>
-    <details class="report"><summary>SQL đã chuyển sang Athena</summary><textarea id="converted" readonly spellcheck="false" aria-label="Converted SQL"></textarea></details>
+    <details class="report"><summary>SQL đã chuyển sang Athena</summary><div class="panel-header"><button type="button" id="copy_converted" class="secondary" disabled>Copy SQL Athena</button><span id="copy_converted_status" role="status"></span></div><textarea id="converted" readonly spellcheck="false" aria-label="Converted SQL"></textarea></details>
     <details class="report"><summary>Resolve bảng nguồn và ghi chú chuyển đổi</summary><div class="table-scroll"><table><thead><tr><th>Reference</th><th>Physical table</th><th>Evidence</th></tr></thead><tbody id="mappings"></tbody></table></div><ul id="notes"></ul></details>
   </section>
   <footer><span>Chỉ sinh SQL. Không kết nối AWS, không thực thi query và không thay đổi repo dbt.</span><span id="health"></span></footer>

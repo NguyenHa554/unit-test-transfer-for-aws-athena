@@ -1,19 +1,19 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const fields = ['sql','etl_date','mode','repo','model_name','target','keys','output_columns','variables','scope_mode','target_filter','scope_confirmed'];
+const fields = ['sql','etl_date','mode','repo','model_name','target','keys','output_columns','variables','scope_mode','target_filter'];
 let current = null, active = 0, requestVersion = 0;
 function invalidate() {
   requestVersion++;
   current = null;
   $('copy').disabled = $('download').disabled = $('download_all').disabled = true;
+  $('copy_converted').disabled = true;
+  $('copy_converted_status').textContent = '';
   if (!$('results').hidden) $('feedback').textContent = 'Đầu vào đã thay đổi. Generate lại để cập nhật query.';
 }
 for (const id of fields) $(id).addEventListener('input', invalidate);
 $('scope_mode').addEventListener('change', () => {
   $('filter_label').hidden = $('scope_mode').value !== 'custom';
-  $('scope_confirmed').checked = false;
 });
-$('etl_date').addEventListener('change', () => { $('scope_confirmed').checked = false; });
 $('clear').addEventListener('click', () => { $('sql').value = ''; invalidate(); $('sql').focus(); });
 function save(text, filename) {
   const url = URL.createObjectURL(new Blob([text], {type:'text/plain;charset=utf-8'}));
@@ -33,6 +33,7 @@ function renderTest(index) {
   $('test_sql').hidden = !test.ready;
   $('test_issue').hidden = test.ready;
   $('test_issue').textContent = test.issues.join(' ');
+  $('duplicate_key_prompt').hidden = !(test.id === 'UT002' && current.columns.length && !current.input_issues.length);
   $('copy').disabled = $('download').disabled = !test.ready;
   $('test_meta').replaceChildren();
   for (const [key,value] of Object.entries(test.metadata)) {
@@ -56,9 +57,31 @@ $('copy').addEventListener('click',async () => {
   catch { $('test_sql').focus(); $('test_sql').select(); $('feedback').textContent = 'Clipboard chưa được cấp quyền. Nhấn Ctrl+C để copy phần đã chọn.'; }
 });
 $('download').addEventListener('click',() => { if (current?.tests[active].ready) save(current.tests[active].sql,filename(current.tests[active].id)); });
+$('copy_converted').addEventListener('click', async () => {
+  if ($('copy_converted').disabled) return;
+  const version = requestVersion;
+  const sql = $('converted');
+  try {
+    await navigator.clipboard.writeText(sql.value);
+    if (version === requestVersion) $('copy_converted_status').textContent = 'Đã copy';
+  } catch {
+    if (version !== requestVersion) return;
+    sql.focus();
+    sql.select();
+    $('copy_converted_status').textContent = 'Nhấn Ctrl+C để copy phần đã chọn.';
+  }
+});
 $('download_all').addEventListener('click',() => { if (current?.tests.every(t=>t.ready)) save(current.tests.map(t=>t.sql).join('\n\n'),filename('all_tests')); });
+$('generate_duplicate').addEventListener('click', () => {
+  const input = $('duplicate_keys');
+  if (!input.value.trim() || $('generate').disabled) { input.focus(); return; }
+  $('keys').value = input.value.trim();
+  $('form').requestSubmit();
+});
 function render(result) {
   current = result; $('results').hidden = false;
+  $('duplicate_keys').value = $('keys').value || result.keys.join(', ');
+  $('duplicate_columns').replaceChildren(...result.columns.map(column => new Option(column, column)));
   const ready = result.tests.filter(t=>t.ready).length;
   $('feedback').textContent = `${ready}/3 query sẵn sàng · Chưa thực thi trên Athena`;
   $('result_title').textContent = result.job || 'Cần bổ sung thông tin';
@@ -79,6 +102,7 @@ function render(result) {
     $('key_choices').append(b);
   }
   $('converted').value=result.sql || '';
+  $('copy_converted').disabled = !result.sql?.trim() || result.status === 'blocked' || result.output_kind === 'relation';
   $('mappings').replaceChildren();
   for (const mapping of result.mappings || []) {
     const tr=document.createElement('tr');
@@ -92,8 +116,7 @@ function render(result) {
 $('form').addEventListener('submit',async e => {
   e.preventDefault(); invalidate();
   const version = requestVersion;
-  const payload=Object.fromEntries(fields.filter(f=>!['variables','scope_confirmed'].includes(f)).map(f=>[f,$(f).value]));
-  payload.scope_confirmed=$('scope_confirmed').checked;
+  const payload=Object.fromEntries(fields.filter(f=>!['variables'].includes(f)).map(f=>[f,$(f).value]));
   try {
     payload.variables=JSON.parse($('variables').value || '{}');
     if (!payload.variables || Array.isArray(payload.variables) || typeof payload.variables!=='object') throw new Error('Biến dbt phải là JSON object.');

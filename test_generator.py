@@ -1,5 +1,6 @@
 """Offline tests. Optional DuckDB executes the generated relational test SQL."""
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -46,7 +47,7 @@ vars:
         path.write_text(text, encoding='utf-8')
 
     def generate(self, sql=SQL, **overrides):
-        return self.generator.generate(dict(sql=sql, etl_date='2026-07-01', scope_confirmed=True, **overrides))
+        return self.generator.generate(dict(sql=sql, etl_date='2026-07-01', **overrides))
 
     def test_three_complete_queries(self):
         result = self.generate()
@@ -62,10 +63,11 @@ vars:
             self.assertEqual(test['metadata']['Status'], 'Not Executed')
         self.assertEqual(result['tests'][2]['sql'].count('EXCEPT ALL'), 2)
 
-    def test_requires_scope_confirmation(self):
+    def test_generates_without_scope_confirmation(self):
         result = self.generator.generate(dict(sql=SQL, etl_date='2026-07-01'))
-        self.assertTrue(all(not t['sql'] for t in result['tests']))
-        self.assertIn('Confirm', ' '.join(result['input_issues']))
+        self.assertEqual(result['status'], 'ready')
+        self.assertTrue(all(t['ready'] for t in result['tests']))
+        self.assertIn("DATE '2026-07-01'", result['scope'])
 
     def test_missing_key_blocks_only_duplicate(self):
         result = self.generate(SQL.replace(", unique_key='id'", ''))
@@ -80,6 +82,23 @@ vars:
         result = self.generate(keys='id, SYM_RUN_DATE')
         self.assertEqual(result['keys'], ['id', 'SYM_RUN_DATE'])
         self.assertIn('GROUP BY "id", "SYM_RUN_DATE"', result['tests'][1]['sql'])
+
+    def test_composite_config_and_actual_duplicate_groups(self):
+        sql = CONFIG.replace("unique_key='id'", "unique_key=['id', 'amount']") + 'SELECT 1 AS id, 10 AS amount'
+        result = self.generate(sql, scope_mode='all')
+        self.assertEqual(result['keys'], ['id', 'amount'])
+        self.assertTrue(result['tests'][1]['ready'])
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.execute("ATTACH DATABASE ':memory:' AS dev_km_stg")
+        db.execute('CREATE TABLE dev_km_stg.example (id INTEGER, amount INTEGER)')
+        db.executemany('INSERT INTO dev_km_stg.example VALUES (?, ?)', [(1,10),(1,20),(2,10)])
+        query = result['tests'][1]['sql']
+        self.assertEqual(db.execute(query).fetchall(), [])
+        db.execute('INSERT INTO dev_km_stg.example VALUES (1,10)')
+        self.assertEqual(db.execute(query).fetchall(), [(1,10,2,'DUPLICATE_KEY')])
+        db.execute('INSERT INTO dev_km_stg.example VALUES (NULL,20)')
+        self.assertIn((None,20,1,'NULL_KEY'), db.execute(query).fetchall())
 
     def test_invalid_key_column(self):
         self.assertFalse(self.generate(keys='not_in_output')['tests'][1]['ready'])
@@ -295,7 +314,7 @@ UNION ALL SELECT id, amount, rn FROM expected_source'''
         url = f'http://127.0.0.1:{server.server_port}'
         with urllib.request.urlopen(url + '/api/health') as response:
             self.assertEqual(json.load(response)['status'], 'ok')
-        payload = json.dumps(dict(sql=SQL,scope_confirmed=True)).encode()
+        payload = json.dumps(dict(sql=SQL)).encode()
         request = urllib.request.Request(url+'/api/generate', data=payload, headers={'Content-Type':'application/json'})
         with urllib.request.urlopen(request) as response:
             self.assertEqual(json.load(response)['status'], 'ready')
@@ -311,7 +330,7 @@ class RealRepositoryTests(unittest.TestCase):
         path = repo / 'dbt/models/km_staging/tdh_sds/lending/km_stg_tdh_sds_cl_invoice.sql'
         if not path.is_file():
             self.skipTest('Actual CL_INVOICE repo not available')
-        result = TestGenerator(repo).generate(dict(sql=path.read_text(encoding='utf-8-sig'), etl_date='2026-07-01',keys='INTERNAL_KEY',scope_confirmed=True))
+        result = TestGenerator(repo).generate(dict(sql=path.read_text(encoding='utf-8-sig'), etl_date='2026-07-01',keys='INTERNAL_KEY'))
         self.assertEqual(result['status'],'ready',result['errors']+result['input_issues'])
         self.assertEqual(result['target'],'dev_km_stg.tdh_sds_cl_invoice')
         self.assertEqual(len(result['columns']),53)

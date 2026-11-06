@@ -217,8 +217,6 @@ class TestGenerator:
         for field in ('sql', 'etl_date', 'mode', 'model_name', 'target', 'scope_mode', 'target_filter'):
             if field in request and not isinstance(request[field], str):
                 raise ValueError(f'{field} must be a string.')
-        if 'scope_confirmed' in request and not isinstance(request['scope_confirmed'], bool):
-            raise ValueError('scope_confirmed must be true or false.')
         conversion_request = dict(request)
         info = None
         info_error = None
@@ -274,8 +272,6 @@ class TestGenerator:
                     result['scope'] = 'TRUE'
                 else:
                     problems.append('Unknown target scope mode.')
-                if request.get('scope_confirmed') is not True:
-                    problems.append('Confirm the displayed target scope before copying generated tests.')
                 root = build_scope(tree)
                 tables = set()
                 for source_scope in root.traverse():
