@@ -35,6 +35,16 @@ class AthenaQuery(Trino):
         TYPE_MAPPING = {**Trino.Generator.TYPE_MAPPING, **ATHENA_QUERY_TYPES}
 
 
+class SparkInput(Spark):
+    class Parser(Spark.Parser):
+        # SQLGlot normally collapses FROM_UTC_TIMESTAMP into AT TIME ZONE,
+        # losing the distinction between shifting a value and attaching a zone.
+        FUNCTIONS = {
+            **Spark.Parser.FUNCTIONS,
+            'FROM_UTC_TIMESTAMP': lambda args: exp.Anonymous(this='from_utc_timestamp', expressions=args),
+        }
+
+
 class AthenaTypeDraft(Spark):
     """Normalize query types while preserving unconverted Spark functions in a draft."""
     class Generator(Spark.Generator):
@@ -353,7 +363,7 @@ class Converter:
             errors.append('Unresolved Jinja remains. This output is a draft, not executable Athena SQL.')
         else:
             try:
-                trees = sqlglot.parse(rendered, read='spark', error_level=sqlglot.ErrorLevel.RAISE)
+                trees = sqlglot.parse(rendered, read=SparkInput, error_level=sqlglot.ErrorLevel.RAISE)
                 if len(trees) != 1 or not isinstance(trees[0], exp.Query):
                     errors.append('Only one SELECT/WITH query is supported; DDL and write statements are not converted.')
                 else:
@@ -374,8 +384,14 @@ class Converter:
                     for hint in list(tree.find_all(exp.Hint)):
                         hint.pop()
                         notes.append('Removed Spark execution hints (for example BROADCAST), unsupported by Athena; relational logic retained.')
+                    tree = self._calendar_explode(tree, notes)
                     self._audit(tree, errors)
                     if not errors:
+                        if any(isinstance(n, exp.Anonymous) and n.name.lower() == 'from_utc_timestamp' for n in tree.walk()):
+                            warnings.append('FROM_UTC_TIMESTAMP treats the input timestamp value as UTC wall time and returns a timezone-free local timestamp. Verify Spark session timezone, parsing of offset-bearing strings, and LAST_CHANGE_DATE against runtime data.')
+                        if any(isinstance(n, exp.Anonymous) and n.name.lower() == 'element_at' for n in tree.walk()):
+                            notes.append('ELEMENT_AT(SPLIT(...), index) retains one-based indexing and the original delimiter; SQL string escapes are decoded by the Spark parser before Trino REGEXP_SPLIT generation.')
+                            warnings.append('ELEMENT_AT out-of-range returns NULL in Athena, matching Spark with ANSI disabled. Spark ANSI enabled can throw instead; validate source ANSI settings and missing split components.')
                         tree = self._compatible_functions(tree, notes)
                         output = tree.sql(dialect=AthenaQuery, pretty=True, unsupported_level=sqlglot.ErrorLevel.RAISE) + ';'
                         sqlglot.parse_one(output, read='trino', error_level=sqlglot.ErrorLevel.RAISE)
@@ -393,8 +409,43 @@ class Converter:
         return {'status': 'blocked' if errors else 'converted', 'sql': output, 'mappings': mappings, 'variables': list(used.values()), 'notes': list(dict.fromkeys(notes)), 'warnings': list(dict.fromkeys(warnings)), 'errors': list(dict.fromkeys(errors)), 'metadata': self.summary()}
 
     @staticmethod
+    def _calendar_explode(tree, notes):
+        # A single SELECT-level explode over a daily sequence has exactly
+        # CROSS JOIN UNNEST semantics, including zero rows for null arrays.
+        occupied = {n.name.lower() for n in tree.find_all(exp.Identifier)}
+        for node in list(tree.find_all(exp.Explode)):
+            alias = node.parent
+            select = alias.parent if isinstance(alias, exp.Alias) else None
+            seq = node.this
+            step = seq.args.get('step') if isinstance(seq, exp.GenerateSeries) else None
+            if not (isinstance(select, exp.Select) and len(select.expressions) == 1
+                    and select.args.get('from') and not select.args.get('joins')
+                    and not any(select.args.get(k) for k in ('where', 'group', 'having', 'qualify', 'order', 'limit', 'offset', 'distinct'))
+                    and isinstance(step, exp.Interval) and isinstance(step.this, exp.Literal)
+                    and step.this.this == '1' and step.args['unit'].name.upper() == 'DAY'):
+                continue
+            alias_name = '__ut_calendar'
+            while alias_name.lower() in occupied:
+                alias_name += '_'
+            occupied.add(alias_name.lower())
+            column = alias.args['alias'].copy()
+            unnest = exp.Unnest(expressions=[seq.copy()], alias=exp.TableAlias(
+                this=exp.to_identifier(alias_name), columns=[column.copy()]))
+            select.set('expressions', [exp.Column(this=column, table=exp.to_identifier(alias_name))])
+            select.set('joins', [exp.Join(this=unnest, kind='CROSS')])
+            notes.append('Calendar EXPLODE(SEQUENCE(start, end, INTERVAL 1 DAY)) → CROSS JOIN UNNEST(SEQUENCE(...)); preserve inclusive endpoints and row multiplicity.')
+        return tree
+
+    @staticmethod
     def _compatible_functions(tree, notes):
         def rewrite(node):
+            if isinstance(node, exp.Anonymous) and node.name.lower() == 'from_utc_timestamp':
+                value, zone = node.expressions
+                utc = exp.Anonymous(this='WITH_TIMEZONE', expressions=[
+                    exp.Cast(this=value.copy(), to=exp.DataType.build('TIMESTAMP')), exp.Literal.string('UTC')])
+                shifted = exp.Anonymous(this='AT_TIMEZONE', expressions=[utc, zone.copy()])
+                notes.append('FROM_UTC_TIMESTAMP → CAST(AT_TIMEZONE(WITH_TIMEZONE(timestamp, UTC), zone) AS TIMESTAMP): retain a timezone-free shifted timestamp. Verify source session timezone and timestamp parsing on runtime data.')
+                return exp.Cast(this=shifted, to=exp.DataType.build('TIMESTAMP'))
             if isinstance(node, exp.AddMonths):
                 # Spark ADD_MONTHS returns DATE, even for timestamp input.
                 # Trino DATE_ADD retains its input type, so normalize to DATE.
@@ -450,21 +501,26 @@ class Converter:
             name = node.sql_name().lower() if isinstance(node, exp.Func) else ''
             if isinstance(node, exp.Anonymous):
                 name = node.name.lower()
-            if name in {'xxhash64', 'hash', 'crc32', 'conv', 'unix_timestamp', 'from_unixtime', 'to_utc_timestamp', 'from_utc_timestamp', 'monotonically_increasing_id', 'get_json_object', 'collect_set', 'collect_list', 'explode', 'posexplode', 'stack'}:
+            if name in {'xxhash64', 'hash', 'crc32', 'conv', 'unix_timestamp', 'from_unixtime', 'to_utc_timestamp', 'monotonically_increasing_id', 'get_json_object', 'collect_set', 'collect_list', 'explode', 'posexplode', 'stack'}:
                 errors.append(f'{name}: exact Spark/Athena semantics are not established; manual conversion required.')
             if isinstance(node, exp.Anonymous):
-                # Repository CL_INVOICE uses element_at(split(RECID, '-'), 1).
-                # A non-null split has at least one element: index 1 cannot be
-                # out of bounds, so Spark ANSI error behavior is irrelevant.
+                # Verified array-only subset: split on a literal delimiter and
+                # use a positive, one-based literal index. Do not infer maps,
+                # dynamic indices, regex dialect features or split limits.
                 args = node.expressions
-                first_split = (name == 'element_at' and len(args) == 2
+                utc_shift = (name == 'from_utc_timestamp' and len(args) == 2
+                             and isinstance(args[1], exp.Literal) and args[1].is_string
+                             and args[1].this in {'UTC', 'Asia/Ho_Chi_Minh', 'Asia/Bangkok'})
+                split_element = (name == 'element_at' and len(args) == 2
                                and isinstance(args[0], exp.RegexpSplit)
                                and isinstance(args[1], exp.Literal) and not args[1].is_string
-                               and args[1].this == '1'
+                               and re.fullmatch(r'[1-9][0-9]*', args[1].this)
                                and isinstance(args[0].expression, exp.Literal)
                                and args[0].expression.is_string
-                               and re.fullmatch(r'[A-Za-z0-9_ ,:/-]+', args[0].expression.this))
-                if not first_split:
+                               and not args[0].args.get('limit')
+                               and (re.fullmatch(r'[A-Za-z0-9_ ,:/-]+', args[0].expression.this)
+                                    or args[0].expression.this == r'\.'))
+                if not split_element and not utc_shift:
                     errors.append(f'Function {node.name} is not recognized by the Spark parser; no verified conversion is available.')
             # Spark array subscripts start at zero; Trino arrays start at one.
             # Let SQLGlot perform this rewrite rather than changing text manually.

@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="vi">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Athena Unit Test Tool</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Athena Unit Test Tool</title><link rel="stylesheet" href="/style.css?v=20261106-uat"><script src="/app.js?v=20261106-uat" defer></script></head>
 <body>
 <header><a class="brand" href="/"><span class="logo">≋</span>Athena <strong>Unit Tests</strong></a><span class="local"><i></i> LOCAL · DEV · ENGINE 3</span></header>
 <main>
@@ -17,6 +17,7 @@
         <label>Đường dẫn repo<input id="repo" placeholder="C:\nguyen\Projects\VIB2\km-etl-newcore"><small>Thư mục chứa dbt/dbt_project.yml. Chỉ đọc metadata.</small></label>
         <label>Tên model (không bắt buộc)<input id="model_name" placeholder="km_stg_tdh_sds_cl_invoice"><small>Hỗ trợ metadata khi SQL đã chỉnh sửa so với file lưu.</small></label>
         <label>Target table<input id="target" placeholder="Tự nhận diện từ config/model"><small>Dạng schema.table hoặc catalog.schema.table.</small></label>
+        <label>Target UAT cho Duplicate<input id="target_uat" placeholder="Tự đổi dev_* thành uat_*"><small>Nhập schema.table nếu tên bảng hoặc catalog UAT khác DEV.</small></label>
         <label>Khóa đơn hoặc khóa ghép<input id="keys" placeholder="INTERNAL_KEY hoặc LOAN_NO, DD_NO"><small>Khóa ghép: nhập các cột cách nhau bằng dấu phẩy. Chỉ báo trùng khi toàn bộ tổ hợp khóa trùng.</small></label>
         <label>Cột output khi SELECT * chưa resolve được<input id="output_columns" placeholder="id, business_date, amount"><small>Nhập đủ tên cột, theo đúng thứ tự đầu ra.</small></label>
         <label>Biến dbt bổ sung (JSON)<textarea id="variables" rows="3" spellcheck="false">{}</textarea><small>Ví dụ {"env_landing": "dev_lnd"}. Ngày ETL lấy từ ô trên.</small></label>
@@ -26,7 +27,7 @@
     <div class="toolbar"><span id="feedback" role="status" aria-live="polite">Đang đọc metadata local…</span><button id="generate" class="primary" type="submit">Generate Unit Tests <span>→</span></button></div>
   </form>
   <section id="results" hidden>
-    <div class="results-title"><div><p class="eyebrow">KẾT QUẢ SINH SQL</p><h2 id="result_title">Unit tests</h2></div><button id="download_all" class="secondary">↓ Tải cả 3 query</button></div>
+    <div class="results-title"><div><p class="eyebrow">KẾT QUẢ SINH SQL</p><h2 id="result_title">Unit tests</h2></div><button id="download_all" class="secondary">↓ Tải toàn bộ SQL</button></div>
     <div id="summary" class="summary-box"></div>
     <div id="issues" class="messages" role="status"></div>
     <div id="key_choices"></div>
@@ -38,6 +39,14 @@
     <section class="editor" id="test_panel" role="tabpanel" tabindex="0">
       <div class="panel-header"><h3 id="test_title"></h3><div class="actions"><span class="badge">Not Executed</span><button id="copy" class="secondary">Copy SQL</button><button id="download" class="secondary">↓ SQL</button></div></div>
       <p id="expected" class="expected"></p><p id="test_issue" class="test-issue" hidden></p>
+      <div id="duplicate_environments" class="panel-header" hidden>
+        <div class="actions" role="group" aria-label="Môi trường Duplicate">
+          <strong>Môi trường:</strong>
+          <button type="button" id="duplicate_dev" class="secondary" aria-pressed="true">DEV</button>
+          <button type="button" id="duplicate_uat" class="secondary" aria-pressed="false">UAT</button>
+        </div>
+        <span id="duplicate_target"></span>
+      </div>
       <div id="duplicate_key_prompt" class="panel-header" hidden>
         <label for="duplicate_keys">Khóa đơn hoặc khóa ghép để kiểm tra trùng
           <input id="duplicate_keys" list="duplicate_columns" placeholder="INTERNAL_KEY hoặc LOAN_NO, DD_NO, REPAY_DATE">

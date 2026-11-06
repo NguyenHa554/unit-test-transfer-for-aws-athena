@@ -69,6 +69,18 @@ def predicate(value):
     return condition.sql('trino')
 
 
+def uat_relation(dev_target):
+    """Apply the app's DEV -> UAT schema convention, keeping the table/catalog."""
+    if not dev_target:
+        return ''
+    table = sqlglot.parse_one('SELECT * FROM ' + dev_target, read='trino').args['from'].this
+    schema = table.db
+    if not schema.lower().startswith('dev_'):
+        return ''
+    table.set('db', exp.to_identifier('uat_' + schema[4:], quoted=table.args['db'].args.get('quoted', False)))
+    return table.sql('trino')
+
+
 def columns_of(tree, supplied=None):
     """Expand CTE/subquery stars only when column names are actually known."""
     def visit(scope):
@@ -214,7 +226,7 @@ class TestGenerator:
     def generate(self, request):
         if not isinstance(request, dict):
             raise ValueError('Expected a JSON object.')
-        for field in ('sql', 'etl_date', 'mode', 'model_name', 'target', 'scope_mode', 'target_filter'):
+        for field in ('sql', 'etl_date', 'mode', 'model_name', 'target', 'target_uat', 'scope_mode', 'target_filter'):
             if field in request and not isinstance(request[field], str):
                 raise ValueError(f'{field} must be a string.')
         conversion_request = dict(request)
@@ -301,7 +313,28 @@ class TestGenerator:
                       expected, '', 'Not Executed', str(request.get('etl_date') or '2026-07-01')]
             result['tests'].append({'id': values[0], 'type': kind, 'sql': sql, 'ready': not issues,
                                     'issues': issues, 'expected': expected, 'metadata': dict(zip(HEADERS, values))})
-        if all(t['ready'] for t in result['tests']):
+            if number == 2:
+                test = result['tests'][-1]
+                uat_issues = list(issues)
+                try:
+                    uat_target = relation(request['target_uat'].strip()) if request.get('target_uat', '').strip() else uat_relation(result['target'])
+                    if not uat_target:
+                        uat_issues.append('Không xác định được bảng UAT. Nhập Target UAT; chỉ tự đổi schema dev_* thành uat_*.')
+                except ValueError as exc:
+                    uat_target = ''
+                    uat_issues.append(str(exc))
+                test['sql'] = '-- Environment: DEV\n' + sql if sql else ''
+                uat_sql = ('-- Environment: UAT\n' + self.query(2, {**result, 'target': uat_target})) if not uat_issues else ''
+                uat_metadata = {**test['metadata'], 'Target Table': uat_target,
+                                'Test Parameter': test['metadata']['Test Parameter'].replace('DEV;', 'UAT;', 1)}
+                test['variants'] = [
+                    {'environment': 'DEV', 'target': result['target'], 'sql': test['sql'],
+                     'ready': test['ready'], 'issues': issues, 'metadata': test['metadata']},
+                    {'environment': 'UAT', 'target': uat_target, 'sql': uat_sql,
+                     'ready': not uat_issues, 'issues': uat_issues, 'metadata': uat_metadata},
+                ]
+                result['notes'].append('UT002 has separate DEV/UAT queries using identical keys and target filters. UAT tables are not verified in Glue; override Target UAT if your schema/catalog differs.')
+        if all(t['ready'] and all(v['ready'] for v in t.get('variants', [])) for t in result['tests']):
             result['status'] = 'ready'
         elif converted['status'] == 'blocked':
             result['status'] = 'blocked'

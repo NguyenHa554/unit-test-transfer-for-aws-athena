@@ -83,6 +83,45 @@ vars:
         self.assertEqual(result['keys'], ['id', 'SYM_RUN_DATE'])
         self.assertIn('GROUP BY "id", "SYM_RUN_DATE"', result['tests'][1]['sql'])
 
+    def test_duplicate_dev_uat_share_composite_key_and_scope(self):
+        result = self.generate(keys='id, SYM_RUN_DATE')
+        dev, uat = result['tests'][1]['variants']
+        self.assertEqual(dev['environment'], 'DEV')
+        self.assertEqual(uat['environment'], 'UAT')
+        self.assertTrue(dev['ready'] and uat['ready'])
+        self.assertEqual(dev['target'], 'dev_km_stg.example')
+        self.assertEqual(uat['target'], 'uat_km_stg.example')
+        self.assertIn('FROM uat_km_stg.example', uat['sql'])
+        for variant in (dev, uat):
+            self.assertIn('GROUP BY "id", "SYM_RUN_DATE"', variant['sql'])
+            self.assertIn(result['scope'], variant['sql'])
+            self.assertEqual(variant['metadata']['Status'], 'Not Executed')
+            sqlglot.parse_one(variant['sql'], read='trino')
+        self.assertEqual(uat['metadata']['Target Table'], 'uat_km_stg.example')
+        self.assertIn('FROM dev_km_stg.example', result['tests'][0]['sql'])
+        self.assertNotIn('uat_km_stg', result['tests'][2]['sql'])
+
+    def test_duplicate_explicit_uat_target_and_literal_scope(self):
+        result = self.generate(target_uat='"uat_catalog"."uat_custom"."a-b"', scope_mode='custom',
+                               target_filter="amount > 0 AND 'dev_keep' = 'dev_keep'")
+        uat = result['tests'][1]['variants'][1]
+        self.assertTrue(uat['ready'])
+        self.assertIn('FROM "uat_catalog"."uat_custom"."a-b"', uat['sql'])
+        self.assertIn("'dev_keep' = 'dev_keep'", uat['sql'])
+
+    def test_duplicate_unknown_uat_requires_explicit_target(self):
+        result = self.generate(target='other_schema.example')
+        self.assertTrue(result['tests'][1]['variants'][0]['ready'])
+        self.assertFalse(result['tests'][1]['variants'][1]['ready'])
+        self.assertEqual(result['tests'][1]['variants'][1]['sql'], '')
+        result = self.generate(target='other_schema.example', target_uat='uat_custom.example')
+        self.assertTrue(result['tests'][1]['variants'][1]['ready'])
+
+    def test_missing_keys_block_both_duplicate_variants(self):
+        result = self.generate(SQL.replace(", unique_key='id'", ''))
+        self.assertEqual([v['ready'] for v in result['tests'][1]['variants']], [False, False])
+        self.assertTrue(all(not v['sql'] for v in result['tests'][1]['variants']))
+
     def test_composite_config_and_actual_duplicate_groups(self):
         sql = CONFIG.replace("unique_key='id'", "unique_key=['id', 'amount']") + 'SELECT 1 AS id, 10 AS amount'
         result = self.generate(sql, scope_mode='all')
@@ -210,7 +249,58 @@ models:
         result = self.generate(SQL.replace('s.amount', "element_at(split(s.amount, '-'), 1) AS amount"))
         self.assertEqual(result['status'], 'ready')
         self.assertIn('ELEMENT_AT(REGEXP_SPLIT', result['sql'])
-        self.assertEqual(self.generate(SQL.replace('s.amount', "element_at(split(s.amount, '-'), 5) AS amount"))['status'], 'blocked')
+        self.assertEqual(self.generate(SQL.replace('s.amount', "element_at(split(s.amount, '-'), 5) AS amount"))['status'], 'ready')
+        for index in ('0', '-1', 's.id'):
+            self.assertEqual(self.generate(SQL.replace('s.amount', f"element_at(split(s.amount, '-'), {index}) AS amount"))['status'], 'blocked')
+
+    def test_calendar_sequence_explode_and_weekday_format(self):
+        sql = CONFIG + """WITH dates AS (
+SELECT DATE '2026-06-26' AS dt_start, DATE '2026-07-01' AS dt_end
+), days AS (
+SELECT explode(sequence(dt_start, dt_end, interval 1 day)) AS calendar_date FROM dates
+)
+SELECT calendar_date AS id, date_format(calendar_date, 'E') AS weekday FROM days"""
+        result = self.generate(sql, scope_mode='all')
+        self.assertEqual(result['status'], 'ready', result['errors'])
+        self.assertIn('CROSS JOIN UNNEST(SEQUENCE', result['sql'])
+        self.assertIn("INTERVAL '1' DAY", result['sql'])
+        self.assertNotIn('ORDINALITY', result['sql'])
+        self.assertIn("'%a'", result['sql'])
+        self.assertNotIn('EXPLODE(', result['sql'])
+        for text in (
+            CONFIG + 'SELECT explode(array(1,2)) AS id',
+            CONFIG + 'SELECT explode(sequence(a,b,interval 1 day)) AS id, 1 AS amount FROM dates',
+        ):
+            self.assertEqual(self.generate(text, scope_mode='all')['status'], 'blocked')
+
+    def test_from_utc_timestamp_retains_timezone_free_output(self):
+        sql = CONFIG + """SELECT 1 AS id,
+from_utc_timestamp(to_timestamp('2607012300', 'yyMMddHHmm'), 'Asia/Ho_Chi_Minh') AS changed_at"""
+        result = self.generate(sql, scope_mode='all')
+        self.assertEqual(result['status'], 'ready', result['errors'])
+        self.assertIn('WITH_TIMEZONE(', result['sql'])
+        self.assertIn("'UTC'", result['sql'])
+        self.assertIn("'Asia/Ho_Chi_Minh'", result['sql'])
+        final = sqlglot.parse_one(result['sql'], read='trino').selects[1].this
+        self.assertIsInstance(final, exp.Cast)
+        self.assertEqual(final.to.this, exp.DataType.Type.TIMESTAMP)
+        self.assertTrue(any('Spark session timezone' in w for w in result['warnings']))
+        unsupported = sql.replace("'Asia/Ho_Chi_Minh'", 'zone_column')
+        self.assertEqual(self.generate(unsupported, scope_mode='all')['status'], 'blocked')
+
+    def test_split_second_component_with_escaped_dot(self):
+        for delimiter in (r"\\.", '_'):
+            text = SQL.replace('s.amount', f"element_at(split(s.amount, '{delimiter}'), 2) AS amount")
+            result = self.generate(text)
+            self.assertEqual(result['status'], 'ready', result['errors'])
+            self.assertIn('ELEMENT_AT(REGEXP_SPLIT', result['sql'])
+            parsed = sqlglot.parse_one(result['sql'], read='trino')
+            function = parsed.find(exp.Bracket)
+            self.assertEqual(function.expressions[0].this, '2')
+            self.assertEqual(function.args['offset'], 1)
+            self.assertTrue(function.args['safe'])
+            self.assertEqual(function.this.expression.this, r'\.' if delimiter != '_' else '_')
+            self.assertTrue(any('ANSI' in w for w in result['warnings']))
 
     def test_cte_star_and_alias(self):
         sql = CONFIG + 'WITH c AS (SELECT 1 AS id, 2 AS amount) SELECT c.* FROM c'
@@ -325,6 +415,32 @@ UNION ALL SELECT id, amount, rn FROM expected_source'''
 
 
 class RealRepositoryTests(unittest.TestCase):
+    def test_fx_master_calendar_timezone_and_duplicate_environments(self):
+        repo = Path(__file__).resolve().parent.parent / 'km-etl-newcore'
+        path = repo / 'dbt/models/km_staging/tdh_sds/forex/km_stg_tdh_sds_fx_master.sql'
+        if not path.is_file():
+            self.skipTest('Actual FX_MASTER repo not available')
+        result = TestGenerator(repo).generate(dict(sql=path.read_text(encoding='utf-8-sig'), etl_date='2026-07-01', keys='INTERNAL_KEY'))
+        self.assertEqual(result['status'], 'ready', result['errors'] + result['input_issues'])
+        self.assertEqual(len(result['columns']), 90)
+        self.assertIn('CROSS JOIN UNNEST(SEQUENCE', result['sql'])
+        self.assertIn('WITH_TIMEZONE(', result['sql'])
+        self.assertEqual([v['target'] for v in result['tests'][1]['variants']],
+                         ['dev_km_stg.tdh_sds_fx_master', 'uat_km_stg.tdh_sds_fx_master'])
+        self.assertTrue(all(t['ready'] for t in result['tests']))
+
+    def test_cl_settle_pay_converts_split_indices_and_composite_key(self):
+        repo = Path(__file__).resolve().parent.parent / 'km-etl-newcore'
+        path = repo / 'dbt/models/km_staging/tdh_sds/lending/km_stg_tdh_sds_cl_settle_pay.sql'
+        if not path.is_file():
+            self.skipTest('Actual CL_SETTLE_PAY repo not available')
+        result = TestGenerator(repo).generate(dict(sql=path.read_text(encoding='utf-8-sig'), etl_date='2026-07-01', keys='INTERNAL_KEY,PAY_SEQ'))
+        self.assertEqual(result['status'], 'ready', result['errors'] + result['input_issues'])
+        self.assertEqual(len(result['columns']), 61)
+        self.assertEqual(result['target'], 'dev_km_stg.tdh_sds_cl_settle_pay')
+        self.assertIn('GROUP BY "INTERNAL_KEY", "PAY_SEQ"', result['tests'][1]['sql'])
+        self.assertTrue(all(t['ready'] for t in result['tests']))
+
     def test_cl_invoice_dev_columns_and_queries(self):
         repo = Path(__file__).resolve().parent.parent / 'km-etl-newcore'
         path = repo / 'dbt/models/km_staging/tdh_sds/lending/km_stg_tdh_sds_cl_invoice.sql'

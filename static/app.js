@@ -1,7 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
-const fields = ['sql','etl_date','mode','repo','model_name','target','keys','output_columns','variables','scope_mode','target_filter'];
+const fields = ['sql','etl_date','mode','repo','model_name','target','target_uat','keys','output_columns','variables','scope_mode','target_filter'];
 let current = null, active = 0, requestVersion = 0;
+let duplicateEnvironment = 'DEV';
 function invalidate() {
   requestVersion++;
   current = null;
@@ -21,13 +22,32 @@ function save(text, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function filename(suffix) { return `${(current.job || 'model').replace(/[^a-z0-9_-]/gi,'_')}_${suffix}.sql`; }
+function displayedTest() {
+  if (!current) return null;
+  const test = current.tests[active];
+  const variant = test.variants?.find(v => v.environment === duplicateEnvironment);
+  return variant ? {...test, ...variant} : test;
+}
+function allScripts() {
+  return current ? current.tests.flatMap(t => t.variants || [t]) : [];
+}
+for (const env of ['DEV', 'UAT']) {
+  $('duplicate_' + env.toLowerCase()).addEventListener('click', () => {
+    duplicateEnvironment = env;
+    renderTest(active);
+  });
+}
 function renderTest(index) {
   active = index;
   if (!current) return;
-  const test = current.tests[index];
+  const test = displayedTest();
+  $('duplicate_environments').hidden = test.id !== 'UT002';
+  $('duplicate_dev').setAttribute('aria-pressed', String(duplicateEnvironment === 'DEV'));
+  $('duplicate_uat').setAttribute('aria-pressed', String(duplicateEnvironment === 'UAT'));
+  $('duplicate_target').textContent = test.id === 'UT002' ? test.target || 'Chưa xác định target' : '';
   for (let i=0; i<3; i++) { $(`tab${i}`).setAttribute('aria-selected',String(i===index)); $(`tab${i}`).tabIndex = i===index ? 0 : -1; }
   $('test_panel').setAttribute('aria-labelledby',`tab${index}`);
-  $('test_title').textContent = `${test.id} · ${test.type}`;
+  $('test_title').textContent = `${test.id} · ${test.type}${test.environment ? ' · ' + test.environment : ''}`;
   $('expected').textContent = `Expected: ${test.expected}`;
   $('test_sql').value = test.sql;
   $('test_sql').hidden = !test.ready;
@@ -52,11 +72,15 @@ for (let i=0;i<3;i++) {
   });
 }
 $('copy').addEventListener('click',async () => {
-  if (!current?.tests[active].ready) return;
-  try { await navigator.clipboard.writeText(current.tests[active].sql); $('copy').textContent = 'Đã copy'; setTimeout(() => $('copy').textContent='Copy SQL',1300); }
+  const test = displayedTest();
+  if (!test?.ready) return;
+  try { await navigator.clipboard.writeText(test.sql); $('copy').textContent = 'Đã copy'; setTimeout(() => $('copy').textContent='Copy SQL',1300); }
   catch { $('test_sql').focus(); $('test_sql').select(); $('feedback').textContent = 'Clipboard chưa được cấp quyền. Nhấn Ctrl+C để copy phần đã chọn.'; }
 });
-$('download').addEventListener('click',() => { if (current?.tests[active].ready) save(current.tests[active].sql,filename(current.tests[active].id)); });
+$('download').addEventListener('click',() => {
+  const test = displayedTest();
+  if (test?.ready) save(test.sql,filename(test.id + (test.environment ? '_' + test.environment : '')));
+});
 $('copy_converted').addEventListener('click', async () => {
   if ($('copy_converted').disabled) return;
   const version = requestVersion;
@@ -71,7 +95,10 @@ $('copy_converted').addEventListener('click', async () => {
     $('copy_converted_status').textContent = 'Nhấn Ctrl+C để copy phần đã chọn.';
   }
 });
-$('download_all').addEventListener('click',() => { if (current?.tests.every(t=>t.ready)) save(current.tests.map(t=>t.sql).join('\n\n'),filename('all_tests')); });
+$('download_all').addEventListener('click',() => {
+  const scripts = allScripts();
+  if (scripts.length && scripts.every(t=>t.ready)) save(scripts.map(t=>t.sql).join('\n\n'),filename('all_tests'));
+});
 $('generate_duplicate').addEventListener('click', () => {
   const input = $('duplicate_keys');
   if (!input.value.trim() || $('generate').disabled) { input.focus(); return; }
@@ -82,11 +109,12 @@ function render(result) {
   current = result; $('results').hidden = false;
   $('duplicate_keys').value = $('keys').value || result.keys.join(', ');
   $('duplicate_columns').replaceChildren(...result.columns.map(column => new Option(column, column)));
-  const ready = result.tests.filter(t=>t.ready).length;
-  $('feedback').textContent = `${ready}/3 query sẵn sàng · Chưa thực thi trên Athena`;
+  const scripts = allScripts();
+  const ready = scripts.filter(t=>t.ready).length;
+  $('feedback').textContent = `${ready}/${scripts.length} query sẵn sàng · Duplicate gồm DEV và UAT · Chưa thực thi trên Athena`;
   $('result_title').textContent = result.job || 'Cần bổ sung thông tin';
   $('summary').textContent = `DEV · Target: ${result.target || 'chưa xác định'} · ${result.columns.length} cột · WHERE ${result.scope || 'chưa xác định'} · Khóa: ${result.keys.join(', ') || 'chưa xác nhận'}`;
-  $('download_all').disabled = ready !== 3;
+  $('download_all').disabled = ready !== scripts.length;
   $('issues').replaceChildren();
   for (const [items,cls] of [[result.errors,'error'],[result.input_issues,'error'],[result.key_problem ? [result.key_problem]:[],'error'],[result.warnings,'warning']]) {
     if (!items?.length) continue;
